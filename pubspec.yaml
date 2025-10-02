@@ -1,0 +1,32 @@
+name: tienda_online_reina
+description: "A new Flutter project."
+publish_to: 'none' 
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.8.1 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # Dependencias de Utilidad requeridas
+  collection: ^1.17.2
+  intl: ^0.18.1 
+  shared_preferences: ^2.2.3 # <--- NUEVA DEPENDENCIA
+    
+  cupertino_icons: ^1.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  
+  # Directorio de Assets (imágenes)
+  assets: 
+    - assets/images/
