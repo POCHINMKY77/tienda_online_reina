@@ -10,11 +10,18 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  provider: ^6.0.0
   
   # Dependencias de Utilidad requeridas
   collection: ^1.17.2
   intl: ^0.18.1 
-  shared_preferences: ^2.2.3 # <--- NUEVA DEPENDENCIA
+  
+  # Dependencias de Firebase
+  firebase_core: ^2.24.2  # Mínimo para inicializar Firebase
+  cloud_firestore: ^4.13.6 # Para la base de datos (Órdenes)
+  firebase_auth: ^4.15.2  # Para la autenticación (Usuarios)
+
+  shared_preferences: ^2.2.2
     
   cupertino_icons: ^1.0.2
 

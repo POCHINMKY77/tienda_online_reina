@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "63355619547",
+    "project_id": "tiendareinaapp",
+    "storage_bucket": "tiendareinaapp.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:63355619547:android:e02dc36aafde05d8ed24fe",
+        "android_client_info": {
+          "package_name": "com.example.tienda_online_reina"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCMQ8eyjV2nR2CoGLE8u_0gDmhHC1EFR1E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
