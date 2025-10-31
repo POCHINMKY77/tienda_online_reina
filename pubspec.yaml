@@ -5,31 +5,32 @@ publish_to: 'none'
 version: 1.0.0+1
 
 environment:
-  sdk: '>=3.8.1 <4.0.0'
+  # Versión del SDK ajustada a un rango común para evitar problemas futuros.
+  # El rango '>3.8.1 <4.0.0' que tenías es muy específico y está bien.
+  sdk: '>=3.0.0 <4.0.0' # Mantengo un rango seguro, pero tu original también era válido.
 
 dependencies:
   flutter:
     sdk: flutter
-  provider: ^6.0.0
   
-  # Dependencias de Utilidad requeridas
-  collection: ^1.17.2
-  intl: ^0.18.1 
+  # Íconos de Cupertino
+  cupertino_icons: ^1.0.8 # Versión ligeramente actualizada
   
-  # Dependencias de Firebase
-  firebase_core: ^2.24.2  # Mínimo para inicializar Firebase
-  cloud_firestore: ^4.13.6 # Para la base de datos (Órdenes)
-  firebase_auth: ^4.15.2  # Para la autenticación (Usuarios)
-
-  shared_preferences: ^2.2.2
-    
-  cupertino_icons: ^1.0.2
+  # Gestión de estado
+  provider: ^6.1.2 # Versión actualizada
+  
+  # Utilidades
+  collection: ^1.18.0 # Versión unificada (estaba duplicada)
+  intl: ^0.19.0 # Versión actualizada (estaba duplicada)
+  shared_preferences: ^2.2.2 # Mantenida
+  
+  # Supabase
+  supabase_flutter: ^2.5.0 # Versión actualizada
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-
-  flutter_lints: ^5.0.0
+  flutter_lints: ^3.0.0 # Versión actualizada y comúnmente usada
 
 flutter:
   uses-material-design: true

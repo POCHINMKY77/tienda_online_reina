@@ -1,9 +1,18 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:collection/collection.dart';
 import 'package:intl/intl.dart';
-import 'dart:convert'; // Necesario para codificar y decodificar JSON
-import 'package:shared_preferences/shared_preferences.dart'; // Persistencia de datos
+import 'dart:convert';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+// =======================================================================
+// CONFIGURACIÓN DE SUPABASE
+// =======================================================================
+class SupabaseConfig {
+  // REEMPLAZA ESTOS VALORES CON TUS CREDENCIALES DE SUPABASE
+  static const String supabaseUrl = 'https://nytegffrdhywrwcxjkih.supabase.co';
+  static const String supabaseAnonKey =
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im55dGVnZmZyZGh5d3J3Y3hqa2loIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE3ODg4OTAsImV4cCI6MjA3NzM2NDg5MH0.-hNJ4xbILf0fUVNpe16k6QuyrLioSsi_oVdvDovCO8E';
+}
 
 // =======================================================================
 // 1. MODELOS DE DATOS
@@ -14,6 +23,20 @@ class User {
   final String password;
   final bool isAdmin;
   User({required this.email, required this.password, this.isAdmin = false});
+
+  Map<String, dynamic> toJson() => {
+    'email': email,
+    'password': password,
+    'is_admin': isAdmin,
+  };
+
+  factory User.fromJson(Map<String, dynamic> json) {
+    return User(
+      email: json['email'],
+      password: json['password'],
+      isAdmin: json['is_admin'] ?? false,
+    );
+  }
 }
 
 class Product {
@@ -31,16 +54,23 @@ class Product {
     required this.category,
   });
 
-  // Método para crear un producto desde un mapa (necesario para el carrito/órdenes)
   factory Product.fromJson(Map<String, dynamic> json) {
     return Product(
       id: json['id'],
       name: json['name'],
-      price: json['price'],
-      imagePath: json['imagePath'],
+      price: json['price'].toDouble(),
+      imagePath: json['image_path'],
       category: json['category'],
     );
   }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'price': price,
+    'image_path': imagePath,
+    'category': category,
+  };
 }
 
 class CartItem {
@@ -48,19 +78,16 @@ class CartItem {
   int quantity;
   CartItem({required this.product, this.quantity = 1});
 
-  // Convertir a JSON
   Map<String, dynamic> toJson() => {
     'product_id': product.id,
     'quantity': quantity,
   };
 
-  // Crear desde JSON (Necesita el producto completo)
   factory CartItem.fromJson(
     Map<String, dynamic> json,
     List<Product> availableProducts,
   ) {
     final productId = json['product_id'];
-    // Aseguramos encontrar el producto antes de crear el CartItem
     final product = availableProducts.firstWhere(
       (p) => p.id == productId,
       orElse: () => throw Exception('Producto con ID $productId no encontrado'),
@@ -74,7 +101,7 @@ class Order {
   final String userId;
   final List<CartItem> items;
   final double total;
-  final String status; // 'Pagado', 'Fiado'
+  final String status;
   final DateTime date;
 
   Order({
@@ -86,34 +113,35 @@ class Order {
     required this.date,
   });
 
-  // Convertir a JSON (para guardar)
   Map<String, dynamic> toJson() => {
     'id': id,
-    'userId': userId,
-    'items': items
-        .map((i) => i.toJson())
-        .toList(), // Guarda solo IDs y cantidad
+    'user_id': userId,
+    // Usar jsonEncode en la capa de la API, no en el modelo
+    'items': items.map((i) => i.toJson()).toList(),
     'total': total,
     'status': status,
     'date': date.toIso8601String(),
   };
 
-  // Crear desde JSON (para cargar)
   factory Order.fromJson(
     Map<String, dynamic> json,
     List<Product> availableProducts,
   ) {
-    // Reconstruir la lista de CartItems
-    final List<dynamic> itemsJson = json['items'];
+    // Si la columna 'items' en Supabase es un JSONB, el valor ya es un List<dynamic>
+    // Si es un String, se requiere jsonDecode
+    final List<dynamic> itemsJson = (json['items'] is String)
+        ? jsonDecode(json['items'])
+        : json['items'];
+
     final items = itemsJson
         .map((i) => CartItem.fromJson(i, availableProducts))
         .toList();
 
     return Order(
       id: json['id'],
-      userId: json['userId'],
+      userId: json['user_id'],
       items: items,
-      total: json['total'],
+      total: json['total'].toDouble(),
       status: json['status'],
       date: DateTime.parse(json['date']),
     );
@@ -121,21 +149,14 @@ class Order {
 }
 
 // =======================================================================
-// 2. SIMULACIÓN DE API / GESTIÓN DE DATOS (CON PERSISTENCIA)
+// 2. SERVICIO DE API CON SUPABASE
 // =======================================================================
 
 class ApiService {
-  // --- DATOS SIMULADOS (Nuestra "Base de Datos" en Memoria) ---
-  static final List<User> _users = [
-    User(email: 'admin@tienda.com', password: 'admin', isAdmin: true),
-    User(email: 'usuario@tienda.com', password: '123'),
-  ];
+  final SupabaseClient _supabase = Supabase.instance.client;
 
-  // Lista de órdenes
-  static List<Order> _orders = [];
-
-  // Lista de productos (debe ser estática para reconstruir órdenes)
-  static final List<Product> _products = [
+  // Lista de productos predefinidos (se insertarán en Supabase si no existen)
+  static final List<Product> _defaultProducts = [
     Product(
       id: 'P01',
       name: 'Pollo Entero',
@@ -376,117 +397,143 @@ class ApiService {
     ),
   ];
 
-  // Clave de almacenamiento
-  static const String _ordersKey = 'tienda_reina_orders';
-
-  // --- MÉTODOS DE PERSISTENCIA ---
-
-  // Carga las órdenes guardadas al iniciar la aplicación
-  static Future<void> loadOrders() async {
+  // Inicializar productos en Supabase
+  Future<void> initializeProducts() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final ordersJsonString = prefs.getString(_ordersKey);
-
-      if (ordersJsonString != null) {
-        final List<dynamic> ordersList = jsonDecode(ordersJsonString);
-        _orders = ordersList
-            .map((json) => Order.fromJson(json, _products))
-            .toList();
-      } else {
-        _orders = [];
+      final response = await _supabase.from('products').select().limit(1);
+      // Usar la propiedad isEmpty del resultado de la consulta.
+      if (response.isEmpty) {
+        for (var product in _defaultProducts) {
+          // El método insert requiere un List<Map> o un Map
+          await _supabase.from('products').insert(product.toJson());
+        }
+        debugPrint('Productos inicializados en Supabase');
       }
     } catch (e) {
-      // Manejo de error si los datos guardados son corruptos o falta un producto
-      debugPrint('Error al cargar órdenes: $e. Inicializando lista vacía.');
-      _orders = [];
+      debugPrint('Error al inicializar productos: $e');
     }
   }
 
-  // Guarda la lista de órdenes
-  static Future<void> saveOrders() async {
-    final prefs = await SharedPreferences.getInstance();
-    final ordersListJson = _orders.map((o) => o.toJson()).toList();
-    final ordersJsonString = jsonEncode(ordersListJson);
-    await prefs.setString(_ordersKey, ordersJsonString);
-  }
-
-  // --- MÉTODOS DE AUTENTICACIÓN SIMULADA ---
+  // Autenticación
   Future<String?> register({
     required String email,
     required String password,
   }) async {
-    await Future.delayed(const Duration(milliseconds: 500));
-    if (_users.any((u) => u.email == email)) {
-      return 'El email ya está registrado.';
+    try {
+      final response = await _supabase
+          .from('users')
+          .select()
+          .eq('email', email);
+      if (response.isNotEmpty) {
+        return 'El email ya está registrado.';
+      }
+
+      await _supabase.from('users').insert({
+        'email': email,
+        'password': password,
+        'is_admin': false,
+      });
+
+      return null;
+    } catch (e) {
+      debugPrint('Error en registro: $e');
+      return 'Error al registrar usuario';
     }
-    _users.add(User(email: email, password: password));
-    return null;
   }
 
   Future<User?> login({required String email, required String password}) async {
-    await Future.delayed(const Duration(milliseconds: 500));
-    return _users.firstWhereOrNull(
-      (u) => u.email == email && u.password == password,
-    );
+    try {
+      final response = await _supabase
+          .from('users')
+          .select()
+          .eq('email', email)
+          .eq('password', password)
+          .single();
+
+      return User.fromJson(response);
+    } catch (e) {
+      debugPrint('Error en login: $e');
+      return null;
+    }
   }
 
-  // --- MÉTODOS DE PRODUCTOS Y ÓRDENES ---
+  // Productos
   Future<List<Product>> getProducts() async {
-    await Future.delayed(const Duration(milliseconds: 100));
-    return _products;
+    try {
+      final response = await _supabase.from('products').select();
+      return response.map((json) => Product.fromJson(json)).toList();
+    } catch (e) {
+      debugPrint('Error al obtener productos: $e');
+      return [];
+    }
   }
 
   Future<List<String>> getCategories() async {
-    await Future.delayed(const Duration(milliseconds: 50));
-    return _products.map((p) => p.category).toSet().toList();
+    try {
+      final products = await getProducts();
+      return products.map((p) => p.category).toSet().toList();
+    } catch (e) {
+      debugPrint('Error al obtener categorías: $e');
+      return [];
+    }
   }
 
+  // Órdenes
   Future<void> placeOrder(
     User user,
     List<CartItem> items,
     double total,
     String status,
   ) async {
-    await Future.delayed(const Duration(seconds: 1));
+    try {
+      final orderId = '${DateTime.now().millisecondsSinceEpoch}';
 
-    final orderId =
-        '${DateTime.now().millisecondsSinceEpoch}-${_orders.length + 1}';
+      await _supabase.from('orders').insert({
+        'id': orderId,
+        'user_id': user.email,
+        // Almacena como JSON string si la columna es TEXT/VARCHAR, o List<Map> si es JSONB
+        'items': jsonEncode(items.map((i) => i.toJson()).toList()),
+        'total': total,
+        'status': status,
+        'date': DateTime.now().toIso8601String(),
+      });
 
-    _orders.add(
-      Order(
-        id: orderId,
-        userId: user.email,
-        // Creamos copias de los CartItems para que la orden tenga un snapshot de la cantidad en ese momento
-        items: items
-            .map(
-              (item) =>
-                  CartItem(product: item.product, quantity: item.quantity),
-            )
-            .toList(),
-        total: total,
-        status: status,
-        date: DateTime.now(),
-      ),
-    );
-
-    // GUARDAR EN DISCO DESPUÉS DE CADA ORDEN
-    await saveOrders();
+      debugPrint('Orden creada exitosamente');
+    } catch (e) {
+      debugPrint('Error al crear orden: $e');
+      throw Exception('Error al procesar orden');
+    }
   }
 
-  // Obtiene todas las órdenes para el administrador
   Future<List<Order>> getAdminOrders() async {
-    // Asegura que la lista esté cargada antes de retornar
-    await loadOrders();
-    await Future.delayed(const Duration(milliseconds: 300));
-    return _orders.reversed.toList();
+    try {
+      final response = await _supabase
+          .from('orders')
+          .select()
+          .order('date', ascending: false);
+
+      final products = await getProducts();
+      return response.map((json) => Order.fromJson(json, products)).toList();
+    } catch (e) {
+      debugPrint('Error al obtener órdenes admin: $e');
+      return [];
+    }
   }
 
-  // Obtiene las órdenes de un usuario específico
   Future<List<Order>> getUserOrders(String userId) async {
-    // Asegura que la lista esté cargada antes de retornar
-    await loadOrders();
-    await Future.delayed(const Duration(milliseconds: 300));
-    return _orders.where((o) => o.userId == userId).toList().reversed.toList();
+    try {
+      final response = await _supabase
+          .from('orders')
+          .select()
+          .eq('user_id', userId)
+          .order('date', ascending: false);
+
+      final products = await getProducts();
+      return response.map((json) => Order.fromJson(json, products)).toList();
+    } catch (e) {
+      debugPrint('Error al obtener órdenes de usuario: $e');
+      return [];
+    }
   }
 }
 
@@ -501,7 +548,6 @@ class CartModel extends ChangeNotifier {
 
   int get totalItemCount => _items.fold(0, (sum, item) => sum + item.quantity);
 
-  // El precio total se recalcula con cada cambio, asegurando la actualización
   double get totalCartPrice {
     return _items.fold(
       0.0,
@@ -509,7 +555,6 @@ class CartModel extends ChangeNotifier {
     );
   }
 
-  // Incrementa la cantidad o añade el producto
   void addItem(Product product) {
     final existingItem = _items.firstWhereOrNull(
       (item) => item.product.id == product.id,
@@ -523,7 +568,6 @@ class CartModel extends ChangeNotifier {
     notifyListeners();
   }
 
-  // Incrementa la cantidad de un item existente (usado por el botón '+')
   void incrementItemQuantity(Product product) {
     final existingItem = _items.firstWhereOrNull(
       (item) => item.product.id == product.id,
@@ -534,7 +578,6 @@ class CartModel extends ChangeNotifier {
     }
   }
 
-  // Decrementa la cantidad o elimina el producto si la cantidad es 1 (usado por el botón '-')
   void decrementItemQuantity(Product product) {
     final existingItem = _items.firstWhereOrNull(
       (item) => item.product.id == product.id,
@@ -544,14 +587,12 @@ class CartModel extends ChangeNotifier {
       if (existingItem.quantity > 1) {
         existingItem.quantity--;
       } else {
-        // Si la cantidad es 1, eliminar el item
         _items.removeWhere((item) => item.product.id == product.id);
       }
       notifyListeners();
     }
   }
 
-  // Elimina el producto completamente, independientemente de la cantidad
   void removeProduct(Product product) {
     _items.removeWhere((item) => item.product.id == product.id);
     notifyListeners();
@@ -567,7 +608,6 @@ class CartModel extends ChangeNotifier {
 // 4. ESTRUCTURA DE LA APLICACIÓN
 // =======================================================================
 
-// Simplificación de Provider (para no requerir la dependencia)
 class ChangeNotifierProvider<T extends ChangeNotifier> extends InheritedWidget {
   final T value;
 
@@ -577,11 +617,11 @@ class ChangeNotifierProvider<T extends ChangeNotifier> extends InheritedWidget {
     required super.child,
   });
 
+  // Simplificamos la lógica de actualización
   @override
-  bool updateShouldNotify(ChangeNotifierProvider oldWidget) =>
+  bool updateShouldNotify(covariant ChangeNotifierProvider<T> oldWidget) =>
       oldWidget.value != value;
 
-  // Corregido: La anotación @SuppressWarnings no existe en Dart/Flutter
   static T of<T extends ChangeNotifier>(
     BuildContext context, {
     bool listen = true,
@@ -605,13 +645,18 @@ class ChangeNotifierProvider<T extends ChangeNotifier> extends InheritedWidget {
   }
 }
 
-// La aplicación principal
 void main() async {
-  // Asegura que Flutter esté inicializado antes de llamar a servicios nativos
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Carga las órdenes guardadas antes de iniciar la app
-  await ApiService.loadOrders();
+  // Inicializar Supabase
+  await Supabase.initialize(
+    url: SupabaseConfig.supabaseUrl,
+    anonKey: SupabaseConfig.supabaseAnonKey,
+  );
+
+  // Inicializar productos en la base de datos
+  final apiService = ApiService();
+  await apiService.initializeProducts();
 
   runApp(
     ChangeNotifierProvider(
@@ -626,16 +671,22 @@ class TiendaOnlineReinaApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Definimos el esquema de colores de la tienda
+    // Definición de colores
     final Color wineRed = const Color(0xFFB71C1C);
     final Color pastelPink = const Color(0xFFF8C8DC);
 
     return MaterialApp(
       title: 'Tienda Online Reina',
       debugShowCheckedModeBanner: false,
+
+      // ✅ Todo el tema debe estar dentro de este constructor
       theme: ThemeData(
+        // Uso de Material 3 recomendado
+        useMaterial3: true,
         fontFamily: 'Inter',
+        // Nota: primaryColor está obsoleto, es mejor confiar en ColorScheme
         primaryColor: wineRed,
+
         appBarTheme: AppBarTheme(
           color: wineRed,
           titleTextStyle: const TextStyle(
@@ -645,10 +696,12 @@ class TiendaOnlineReinaApp extends StatelessWidget {
           ),
           iconTheme: const IconThemeData(color: Colors.white),
         ),
+
         floatingActionButtonTheme: FloatingActionButtonThemeData(
           backgroundColor: wineRed,
           foregroundColor: Colors.white,
         ),
+
         elevatedButtonTheme: ElevatedButtonThemeData(
           style: ElevatedButton.styleFrom(
             backgroundColor: wineRed,
@@ -659,29 +712,39 @@ class TiendaOnlineReinaApp extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
           ),
         ),
-        scaffoldBackgroundColor: pastelPink.withOpacity(0.3),
+
+        // 1. ✅ CARD THEME: CardThemeData es correcto dentro de ThemeData.
         cardTheme: CardThemeData(
-          elevation: 8.0,
+          clipBehavior: Clip.antiAlias,
+          color: Colors.white,
+          // La constante 'const' debe ir al inicio si es posible
+          shadowColor: Colors.grey.shade500,
+          elevation: 4.0,
+          margin: const EdgeInsets.all(8.0),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16.0),
+            borderRadius: BorderRadius.circular(12.0),
           ),
-          color: Colors.blueGrey[50],
-          shadowColor: Colors.black38,
-          margin: const EdgeInsets.all(12.0),
         ),
-        inputDecorationTheme: InputDecorationTheme(
-          filled: true,
-          fillColor: Colors.white.withOpacity(0.8),
+
+        // 2. ✅ INPUT DECORATION THEME:
+        //    Los parámetros de borde deben ir DENTRO de OutlineInputBorder.
+        inputDecorationTheme: const InputDecorationTheme(
           border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: BorderSide.none,
+            borderRadius: BorderRadius.all(
+              Radius.circular(10),
+            ), // Parámetro del borde
+            borderSide: BorderSide.none, // Parámetro del borde
           ),
+          labelStyle: TextStyle(color: Colors.blue),
         ),
+
+        // 3. COLOR SCHEME:
         colorScheme: ColorScheme.fromSeed(
           seedColor: wineRed,
+          // secondary es la propiedad para el color secundario
           secondary: pastelPink,
         ),
-      ),
+      ), // ✅ Cierre CORRECTO de ThemeData
       home: const AuthenticationWrapper(),
     );
   }
@@ -762,15 +825,20 @@ class _LoginScreenState extends State<LoginScreen> {
     }
 
     if (_isRegistering) {
-      // CORRECCIÓN: Se eliminó el doble 'required' del API service.
       String? error = await _apiService.register(
         email: email,
         password: password,
       );
       if (error == null) {
+        // CORRECCIÓN: Si el registro es exitoso, intenta loguear inmediatamente
         final user = await _apiService.login(email: email, password: password);
         if (user != null) {
           widget.onLoginSuccess(user);
+        } else {
+          setState(
+            () => _errorMessage =
+                'Registro exitoso, pero falló el inicio de sesión.',
+          );
         }
       } else {
         setState(() => _errorMessage = error);
@@ -788,12 +856,18 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // 1. Imagen de Fondo de la Tienda (Inicio y Registro)
           Image.asset(
             'assets/images/tienda_fondo.jpg',
             fit: BoxFit.cover,
@@ -809,11 +883,7 @@ class _LoginScreenState extends State<LoginScreen> {
               );
             },
           ),
-
-          // 2. Overlay Oscuro Semi-transparente
           Container(color: Colors.black.withOpacity(0.6)),
-
-          // 3. Contenido de Login/Registro
           Center(
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(32.0),
@@ -904,7 +974,7 @@ class _LoginScreenState extends State<LoginScreen> {
 }
 
 // =======================================================================
-// 6. PANTALLA PRINCIPAL DE PRODUCTOS (HOME)
+// 6. PANTALLA PRINCIPAL DE USUARIO (HOME)
 // =======================================================================
 
 class HomeScreen extends StatefulWidget {
@@ -922,6 +992,7 @@ class _HomeScreenState extends State<HomeScreen> {
   List<String> _categories = ['Todos'];
   List<Product> _allProducts = [];
   bool _isLoading = true;
+  String _currentCategory = 'Todos'; // Estado para la categoría seleccionada
 
   @override
   void initState() {
@@ -945,9 +1016,14 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _selectSection(String section) {
-    Navigator.of(context).pop();
+    Navigator.of(context).pop(); // Cierra el Drawer
     setState(() {
       _currentView = section;
+      if (_categories.contains(section)) {
+        _currentCategory = section;
+        _currentView =
+            'Productos'; // Cambia la vista si se selecciona una categoría
+      }
     });
   }
 
@@ -979,9 +1055,7 @@ class _HomeScreenState extends State<HomeScreen> {
             );
           },
         ),
-
         Container(color: Colors.black.withOpacity(0.5)),
-
         Center(
           child: Card(
             color: Colors.white.withOpacity(0.85),
@@ -1018,6 +1092,12 @@ class _HomeScreenState extends State<HomeScreen> {
                     textAlign: TextAlign.center,
                     style: TextStyle(fontSize: 14, color: Colors.black54),
                   ),
+                  const SizedBox(height: 20),
+                  ElevatedButton.icon(
+                    onPressed: () => _selectSection('Productos'),
+                    icon: const Icon(Icons.store),
+                    label: const Text('Ir a la Tienda'),
+                  ),
                 ],
               ),
             ),
@@ -1028,9 +1108,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildProductGrid(BuildContext context) {
-    final filteredProducts = _currentView == 'Todos'
+    final filteredProducts = _currentCategory == 'Todos'
         ? _allProducts
-        : _allProducts.where((p) => p.category == _currentView).toList();
+        : _allProducts.where((p) => p.category == _currentCategory).toList();
 
     final cartModel = ChangeNotifierProvider.of<CartModel>(context);
 
@@ -1041,7 +1121,7 @@ class _HomeScreenState extends State<HomeScreen> {
             child: filteredProducts.isEmpty
                 ? Center(
                     child: Text(
-                      'No hay productos en la categoría $_currentView.',
+                      'No hay productos en la categoría $_currentCategory.',
                     ),
                   )
                 : GridView.builder(
@@ -1073,17 +1153,19 @@ class _HomeScreenState extends State<HomeScreen> {
           );
   }
 
-  // Lógica para determinar el contenido de la pantalla principal
   Widget _buildBody() {
     switch (_currentView) {
       case 'Mi Carrito':
         return CartScreen(
           user: widget.user,
           onOrderPlaced: (status) {
+            ChangeNotifierProvider.of<CartModel>(
+              context,
+              listen: false,
+            ).clearCart(); // Limpiar carrito
             setState(() {
               _currentView = 'Confirmación';
             });
-            // Opcional: mostrar un Snackbar con el estado
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 content: Text(
@@ -1098,7 +1180,7 @@ class _HomeScreenState extends State<HomeScreen> {
       case 'Mis Órdenes':
         return UserOrdersScreen(userId: widget.user.email);
       case 'Confirmación':
-        // Después de la confirmación, regresamos al inicio en un tiempo
+        // CORRECCIÓN: Usamos Future.delayed para volver al Home después de la confirmación
         Future.delayed(const Duration(seconds: 3), () {
           if (mounted && _currentView == 'Confirmación') {
             setState(() {
@@ -1109,8 +1191,8 @@ class _HomeScreenState extends State<HomeScreen> {
         return const OrderConfirmationScreen();
       case 'Tienda (Inicio)':
         return _buildHomeContentView(context, widget.user);
+      case 'Productos': // Muestra la cuadrícula de productos
       default:
-        // Todas las categorías
         return _buildProductGrid(context);
     }
   }
@@ -1119,19 +1201,18 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final cartModel = ChangeNotifierProvider.of<CartModel>(context);
 
-    SystemChrome.setSystemUIOverlayStyle(
-      SystemUiOverlayStyle(
-        statusBarColor: Theme.of(context).primaryColor,
-        statusBarIconBrightness: Brightness.light,
-      ),
-    );
-
+    // Se agrega el Drawer para la navegación
     return Scaffold(
       appBar: AppBar(
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_currentView, style: const TextStyle(fontSize: 18)),
+            Text(
+              _currentView == 'Productos'
+                  ? 'Catálogo: $_currentCategory'
+                  : _currentView,
+              style: const TextStyle(fontSize: 18),
+            ),
             Text(
               'Usuario: ${widget.user.email}',
               style: const TextStyle(fontSize: 12, color: Colors.white70),
@@ -1151,54 +1232,98 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               if (cartModel.totalItemCount > 0)
                 Positioned(
-                  right: 5,
-                  top: 5,
+                  right: 0,
                   child: Container(
                     padding: const EdgeInsets.all(4),
                     decoration: BoxDecoration(
-                      color: Theme.of(context).colorScheme.secondary,
-                      shape: BoxShape.circle,
+                      color: Colors.pinkAccent,
+                      borderRadius: BorderRadius.circular(10),
                     ),
                     constraints: const BoxConstraints(
-                      minWidth: 20,
-                      minHeight: 20,
+                      minWidth: 18,
+                      minHeight: 18,
                     ),
                     child: Text(
-                      cartModel.totalItemCount.toString(),
-                      style: const TextStyle(
-                        color: Colors.black, // Color negro para contraste
-                        fontSize: 10,
-                        fontWeight: FontWeight.bold,
-                      ),
+                      '${cartModel.totalItemCount}',
+                      style: const TextStyle(color: Colors.white, fontSize: 12),
                       textAlign: TextAlign.center,
                     ),
                   ),
                 ),
             ],
           ),
-          // Botón de ir a órdenes (solo si no estamos en 'Mi Carrito' u 'Órdenes')
-          if (_currentView != 'Mi Carrito' && _currentView != 'Mis Órdenes')
-            IconButton(
-              icon: const Icon(Icons.history),
-              onPressed: () {
-                setState(() {
-                  _currentView = 'Mis Órdenes';
-                });
-              },
-            ),
         ],
       ),
-      drawer: CustomDrawer(
-        user: widget.user,
-        categories: _categories,
-        currentCategory: _currentView,
-        onSelectCategory: (category) {
-          setState(() {
-            _currentView = category;
-          });
-          Navigator.of(context).pop(); // Cierra el Drawer
-        },
-        onLogout: widget.onLogout,
+      drawer: Drawer(
+        child: ListView(
+          padding: EdgeInsets.zero,
+          children: <Widget>[
+            DrawerHeader(
+              decoration: BoxDecoration(color: Theme.of(context).primaryColor),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(Icons.store, color: Colors.white, size: 40),
+                  const Text(
+                    'Tienda Reina',
+                    style: TextStyle(color: Colors.white, fontSize: 24),
+                  ),
+                  Text(
+                    widget.user.email,
+                    style: const TextStyle(color: Colors.white70, fontSize: 14),
+                  ),
+                ],
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.home),
+              title: const Text('Inicio'),
+              onTap: () => _selectSection('Tienda (Inicio)'),
+            ),
+            ExpansionTile(
+              leading: const Icon(Icons.category),
+              title: const Text('Productos por Categoría'),
+              initiallyExpanded: _currentView == 'Productos',
+              children: _categories.map((category) {
+                return ListTile(
+                  title: Padding(
+                    padding: const EdgeInsets.only(left: 30),
+                    child: Text(category),
+                  ),
+                  selected:
+                      _currentCategory == category &&
+                      _currentView == 'Productos',
+                  onTap: () {
+                    setState(() {
+                      _currentCategory = category;
+                      _currentView = 'Productos';
+                    });
+                    Navigator.of(context).pop();
+                  },
+                );
+              }).toList(),
+            ),
+            ListTile(
+              leading: const Icon(Icons.shopping_cart),
+              title: const Text('Mi Carrito'),
+              onTap: () => _selectSection('Mi Carrito'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.receipt_long),
+              title: const Text('Mis Órdenes'),
+              onTap: () => _selectSection('Mis Órdenes'),
+            ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.logout, color: Colors.red),
+              title: const Text(
+                'Cerrar Sesión',
+                style: TextStyle(color: Colors.red),
+              ),
+              onTap: widget.onLogout,
+            ),
+          ],
+        ),
       ),
       body: _buildBody(),
     );
@@ -1206,10 +1331,9 @@ class _HomeScreenState extends State<HomeScreen> {
 }
 
 // =======================================================================
-// 7. WIDGETS REUTILIZABLES
+// 7. WIDGET DE TARJETA DE PRODUCTO
 // =======================================================================
 
-// --- Card de Producto para la cuadrícula ---
 class ProductCard extends StatelessWidget {
   final Product product;
   final VoidCallback onAddToCart;
@@ -1223,56 +1347,48 @@ class ProductCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-      elevation: 4,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Imagen del Producto
           Expanded(
-            child: Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: Image.asset(
-                  product.imagePath,
-                  fit: BoxFit.cover,
-                  errorBuilder: (context, error, stackTrace) {
-                    return Container(
-                      color: Colors.grey[200],
-                      child: Center(
-                        child: Icon(
-                          Icons.image_not_supported,
-                          color: Theme.of(context).primaryColor,
-                        ),
+            child: ClipRRect(
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(16.0),
+              ),
+              child: Image.asset(
+                product.imagePath,
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) {
+                  return Container(
+                    color: Colors.grey[300],
+                    child: Center(
+                      child: Text(
+                        '${product.name}\n(Img no encontrada)',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(fontSize: 12),
                       ),
-                    );
-                  },
-                ),
+                    ),
+                  );
+                },
               ),
             ),
           ),
           Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: 10.0,
-              vertical: 5.0,
-            ),
+            padding: const EdgeInsets.all(8.0),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
                   product.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     fontWeight: FontWeight.bold,
                     fontSize: 16,
                   ),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                Text(
-                  'Cat: ${product.category}',
-                  style: const TextStyle(fontSize: 12, color: Colors.black54),
                 ),
                 const SizedBox(height: 5),
+                // CORRECCIÓN del error original de sintaxis en el string interpolation
                 Text(
                   '${NumberFormat.currency(symbol: '\$', decimalDigits: 2).format(product.price)} c/u',
                   style: TextStyle(
@@ -1290,6 +1406,7 @@ class ProductCard extends StatelessWidget {
                     label: const Text('Añadir', style: TextStyle(fontSize: 14)),
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 8),
+                      // Se usan los estilos predefinidos en ThemeData
                     ),
                   ),
                 ),
@@ -1302,338 +1419,13 @@ class ProductCard extends StatelessWidget {
   }
 }
 
-// --- Item del Carrito de Compras ---
-class CartItemTile extends StatelessWidget {
-  final CartItem item;
-  final CartModel cartModel;
-
-  const CartItemTile({super.key, required this.item, required this.cartModel});
-
-  @override
-  Widget build(BuildContext context) {
-    final Product product = item.product;
-    final totalItemPrice = item.quantity * product.price;
-
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 4.0),
-      child: ListTile(
-        leading: ClipRRect(
-          borderRadius: BorderRadius.circular(8.0),
-          child: Image.asset(
-            product.imagePath,
-            width: 50,
-            height: 50,
-            fit: BoxFit.cover,
-            errorBuilder: (context, error, stackTrace) =>
-                const Icon(Icons.image),
-          ),
-        ),
-        title: Text(
-          product.name,
-          style: const TextStyle(fontWeight: FontWeight.bold),
-        ),
-        subtitle: Text(
-          '${NumberFormat.currency(symbol: '\$', decimalDigits: 2).format(product.price)} x ${item.quantity}',
-        ),
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Botón -
-            IconButton(
-              icon: const Icon(Icons.remove_circle_outline, color: Colors.red),
-              onPressed: () => cartModel.decrementItemQuantity(product),
-            ),
-            // Cantidad
-            Text(
-              item.quantity.toString(),
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-            // Botón +
-            IconButton(
-              icon: const Icon(Icons.add_circle_outline, color: Colors.green),
-              onPressed: () => cartModel.incrementItemQuantity(product),
-            ),
-            // Total del Item
-            Container(
-              width: 60,
-              alignment: Alignment.centerRight,
-              child: Text(
-                NumberFormat.currency(
-                  symbol: '\$',
-                  decimalDigits: 2,
-                ).format(totalItemPrice),
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  color: Theme.of(context).primaryColor,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// --- Resumen de Orden ---
-class OrderSummaryCard extends StatelessWidget {
-  final double subtotal;
-  final double total;
-  final String? discountText;
-
-  const OrderSummaryCard({
-    super.key,
-    required this.subtotal,
-    required this.total,
-    this.discountText,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text(
-              'Resumen del Pedido',
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-                decoration: TextDecoration.underline,
-              ),
-            ),
-            const SizedBox(height: 10),
-            _buildSummaryRow('Subtotal:', subtotal, Colors.black87),
-            if (discountText != null)
-              _buildSummaryRow(discountText!, 0.0, Colors.green),
-            const Divider(height: 20),
-            _buildSummaryRow(
-              'TOTAL A PAGAR:',
-              total,
-              Theme.of(context).primaryColor,
-              isTotal: true,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSummaryRow(
-    String label,
-    double amount,
-    Color color, {
-    bool isTotal = false,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4.0),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: isTotal ? 18 : 16,
-              fontWeight: isTotal ? FontWeight.bold : FontWeight.normal,
-              color: isTotal ? color : Colors.black,
-            ),
-          ),
-          Text(
-            NumberFormat.currency(
-              symbol: '\$',
-              decimalDigits: 2,
-            ).format(amount),
-            style: TextStyle(
-              fontSize: isTotal ? 20 : 16,
-              fontWeight: isTotal ? FontWeight.w900 : FontWeight.bold,
-              color: color,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// --- Tile de Orden Histórica ---
-class OrderTile extends StatelessWidget {
-  final Order order;
-  final bool isAdminView;
-
-  const OrderTile({super.key, required this.order, this.isAdminView = false});
-
-  @override
-  Widget build(BuildContext context) {
-    final primaryColor = Theme.of(context).primaryColor;
-    final isPaid = order.status == 'Pagado';
-    final statusColor = isPaid ? Colors.green : Colors.amber[700];
-
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 6.0),
-      elevation: 4,
-      child: ExpansionTile(
-        tilePadding: const EdgeInsets.symmetric(
-          horizontal: 16.0,
-          vertical: 8.0,
-        ),
-        leading: Icon(Icons.receipt_long, color: primaryColor, size: 30),
-        title: Text(
-          'Orden #${order.id.split('-').last}',
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-        ),
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (isAdminView)
-              Text(
-                'Cliente: ${order.userId}',
-                style: const TextStyle(fontSize: 12, color: Colors.black54),
-              ),
-            Text(
-              DateFormat('dd/MM/yyyy HH:mm').format(order.date),
-              style: const TextStyle(fontSize: 12, color: Colors.black54),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              'Estado: ${order.status}',
-              style: TextStyle(
-                color: statusColor,
-                fontWeight: FontWeight.bold,
-                fontSize: 14,
-              ),
-            ),
-          ],
-        ),
-        trailing: Text(
-          NumberFormat.currency(
-            symbol: '\$',
-            decimalDigits: 2,
-          ).format(order.total),
-          style: TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.w900,
-            color: primaryColor,
-          ),
-        ),
-        children: [
-          const Divider(),
-          ...order.items.map((item) {
-            return ListTile(
-              title: Text(item.product.name),
-              trailing: Text(
-                '${item.quantity} x \$${item.product.price.toStringAsFixed(2)}',
-              ),
-            );
-          }),
-          const SizedBox(height: 10),
-        ],
-      ),
-    );
-  }
-}
-
-// --- Drawer personalizado ---
-class CustomDrawer extends StatelessWidget {
-  final User user;
-  final List<String> categories;
-  final String currentCategory;
-  final Function(String) onSelectCategory;
-  final VoidCallback onLogout;
-
-  const CustomDrawer({
-    super.key,
-    required this.user,
-    required this.categories,
-    required this.currentCategory,
-    required this.onSelectCategory,
-    required this.onLogout,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final primaryColor = Theme.of(context).primaryColor;
-
-    return Drawer(
-      child: Column(
-        children: <Widget>[
-          UserAccountsDrawerHeader(
-            accountName: Text(
-              user.isAdmin ? 'Administrador' : user.email,
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-            accountEmail: user.isAdmin
-                ? const Text(
-                    'Vista de Administración',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  )
-                : const Text('Comprador'),
-            currentAccountPicture: CircleAvatar(
-              backgroundColor: Colors.white,
-              child: Icon(
-                user.isAdmin ? Icons.lock_open : Icons.person,
-                color: primaryColor,
-                size: 40,
-              ),
-            ),
-            decoration: BoxDecoration(color: primaryColor),
-          ),
-          // Secciones de Categorías
-          Expanded(
-            child: ListView.builder(
-              padding: EdgeInsets.zero,
-              itemCount: categories.length,
-              itemBuilder: (context, index) {
-                final category = categories[index];
-                final isSelected = category == currentCategory;
-                return ListTile(
-                  title: Text(category),
-                  leading: const Icon(Icons.category),
-                  selected: isSelected,
-                  selectedTileColor: primaryColor.withOpacity(0.1),
-                  selectedColor: primaryColor,
-                  onTap: () => onSelectCategory(category),
-                );
-              },
-            ),
-          ),
-
-          const Divider(),
-
-          // Sección de Órdenes
-          ListTile(
-            title: const Text('Mis Órdenes'),
-            leading: const Icon(Icons.history),
-            onTap: () => onSelectCategory('Mis Órdenes'),
-          ),
-
-          // Botón de Cerrar Sesión
-          ListTile(
-            title: const Text(
-              'Cerrar Sesión',
-              style: TextStyle(color: Colors.red),
-            ),
-            leading: const Icon(Icons.logout, color: Colors.red),
-            onTap: () {
-              Navigator.of(context).pop();
-              onLogout();
-            },
-          ),
-          const SizedBox(height: 20),
-        ],
-      ),
-    );
-  }
-}
-
 // =======================================================================
-// 8. PANTALLAS DE FLUJO DE COMPRA
+// 8. PANTALLA DE CARRITO (CART)
 // =======================================================================
 
 class CartScreen extends StatelessWidget {
   final User user;
-  final Function(String) onOrderPlaced;
+  final Function(String status) onOrderPlaced;
 
   const CartScreen({
     super.key,
@@ -1641,74 +1433,15 @@ class CartScreen extends StatelessWidget {
     required this.onOrderPlaced,
   });
 
-  void _showCheckoutDialog(BuildContext context, CartModel cartModel) {
-    showDialog(
+  void _showCheckoutSheet(BuildContext context, CartModel cart) {
+    showModalBottomSheet(
       context: context,
-      builder: (BuildContext dialogContext) {
-        return AlertDialog(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(20),
-          ),
-          title: Text(
-            'Finalizar Pedido',
-            style: TextStyle(color: Theme.of(context).primaryColor),
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              OrderSummaryCard(
-                subtotal: cartModel.totalCartPrice,
-                total: cartModel.totalCartPrice,
-              ),
-              const SizedBox(height: 20),
-              const Text(
-                'Selecciona el método de pago:',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.of(dialogContext).pop();
-              },
-              child: const Text(
-                'Cancelar',
-                style: TextStyle(color: Colors.grey),
-              ),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                // Simulación de Pedido Fiado
-                Navigator.of(dialogContext).pop();
-                await ApiService().placeOrder(
-                  user,
-                  cartModel.items,
-                  cartModel.totalCartPrice,
-                  'Fiado',
-                );
-                cartModel.clearCart();
-                onOrderPlaced('Fiado');
-              },
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.amber),
-              child: const Text('Fiado', style: TextStyle(color: Colors.black)),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                // Simulación de Pago
-                Navigator.of(dialogContext).pop();
-                await ApiService().placeOrder(
-                  user,
-                  cartModel.items,
-                  cartModel.totalCartPrice,
-                  'Pagado',
-                );
-                cartModel.clearCart();
-                onOrderPlaced('Pagado');
-              },
-              child: const Text('Pagar'),
-            ),
-          ],
+      isScrollControlled: true,
+      builder: (context) {
+        return CheckoutSheet(
+          cart: cart,
+          user: user,
+          onOrderPlaced: onOrderPlaced,
         );
       },
     );
@@ -1716,65 +1449,375 @@ class CartScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Usamos Consumer/Selector (simulado con listen: true en of) para escuchar cambios
     final cartModel = ChangeNotifierProvider.of<CartModel>(context);
 
-    if (cartModel.items.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+    return cartModel.items.isEmpty
+        ? const Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.shopping_basket, size: 80, color: Colors.grey),
+                SizedBox(height: 16),
+                Text('Tu carrito está vacío.', style: TextStyle(fontSize: 18)),
+              ],
+            ),
+          )
+        : Column(
+            children: [
+              Expanded(
+                child: ListView.builder(
+                  padding: const EdgeInsets.all(8.0),
+                  itemCount: cartModel.items.length,
+                  itemBuilder: (context, index) {
+                    final item = cartModel.items[index];
+                    return _CartItemTile(cartItem: item, cartModel: cartModel);
+                  },
+                ),
+              ),
+              Card(
+                margin: const EdgeInsets.all(8.0),
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text(
+                            'Total:',
+                            style: TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          Text(
+                            NumberFormat.currency(
+                              symbol: '\$',
+                              decimalDigits: 2,
+                            ).format(cartModel.totalCartPrice),
+                            style: TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold,
+                              color: Theme.of(context).primaryColor,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: () =>
+                              _showCheckoutSheet(context, cartModel),
+                          icon: const Icon(Icons.payment),
+                          label: const Text('Proceder a Pagar'),
+                          style: ElevatedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          );
+  }
+}
+
+class _CartItemTile extends StatelessWidget {
+  final CartItem cartItem;
+  final CartModel cartModel;
+
+  const _CartItemTile({required this.cartItem, required this.cartModel});
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 4.0),
+      child: Padding(
+        padding: const EdgeInsets.all(8.0),
+        child: Row(
           children: [
-            Icon(
-              Icons.shopping_bag_outlined,
-              size: 80,
-              color: Theme.of(context).primaryColor,
+            SizedBox(
+              width: 60,
+              height: 60,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8.0),
+                child: Image.asset(
+                  cartItem.product.imagePath,
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) =>
+                      Container(color: Colors.grey),
+                ),
+              ),
             ),
-            const SizedBox(height: 20),
-            const Text(
-              'Tu carrito está vacío.',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    cartItem.product.name,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  ),
+                  Text(
+                    NumberFormat.currency(
+                      symbol: '\$',
+                      decimalDigits: 2,
+                    ).format(cartItem.product.price),
+                    style: const TextStyle(fontSize: 14, color: Colors.grey),
+                  ),
+                ],
+              ),
             ),
-            const Text(
-              'Añade productos de la tienda para empezar a comprar.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.black54),
+            Row(
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.remove_circle_outline),
+                  onPressed: () =>
+                      cartModel.decrementItemQuantity(cartItem.product),
+                ),
+                Text(
+                  '${cartItem.quantity}',
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.add_circle_outline),
+                  onPressed: () =>
+                      cartModel.incrementItemQuantity(cartItem.product),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete, color: Colors.red),
+                  onPressed: () => cartModel.removeProduct(cartItem.product),
+                ),
+              ],
             ),
           ],
         ),
-      );
-    }
-
-    return Column(
-      children: [
-        // Lista de Items del Carrito
-        Expanded(
-          child: ListView.builder(
-            itemCount: cartModel.items.length,
-            itemBuilder: (context, index) {
-              final item = cartModel.items[index];
-              return CartItemTile(item: item, cartModel: cartModel);
-            },
-          ),
-        ),
-        // Resumen y Botón de Checkout
-        OrderSummaryCard(
-          subtotal: cartModel.totalCartPrice,
-          total: cartModel.totalCartPrice,
-          discountText: 'Descuento (0%):',
-        ),
-        Padding(
-          padding: const EdgeInsets.all(12.0),
-          child: ElevatedButton(
-            onPressed: () => _showCheckoutDialog(context, cartModel),
-            style: ElevatedButton.styleFrom(
-              minimumSize: const Size(double.infinity, 50),
-            ),
-            child: const Text('FINALIZAR COMPRA'),
-          ),
-        ),
-      ],
+      ),
     );
   }
 }
+
+// =======================================================================
+// 9. CHECKOUT / PROCESO DE PAGO
+// =======================================================================
+
+class CheckoutSheet extends StatefulWidget {
+  final CartModel cart;
+  final User user;
+  final Function(String status) onOrderPlaced;
+
+  const CheckoutSheet({
+    super.key,
+    required this.cart,
+    required this.user,
+    required this.onOrderPlaced,
+  });
+
+  @override
+  State<CheckoutSheet> createState() => _CheckoutSheetState();
+}
+
+class _CheckoutSheetState extends State<CheckoutSheet> {
+  String _paymentMethod = 'Efectivo';
+  bool _isProcessing = false;
+
+  Future<void> _placeOrder() async {
+    setState(() => _isProcessing = true);
+    final apiService = ApiService();
+    try {
+      await apiService.placeOrder(
+        widget.user,
+        widget.cart.items,
+        widget.cart.totalCartPrice,
+        _paymentMethod,
+      );
+      Navigator.of(context).pop(); // Cierra el modal
+      widget.onOrderPlaced(_paymentMethod);
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Error al procesar la orden. Intente de nuevo.'),
+        ),
+      );
+    } finally {
+      setState(() => _isProcessing = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        16,
+        16,
+        16,
+        MediaQuery.of(context).viewInsets.bottom + 16,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Resumen de Pago',
+            style: TextStyle(
+              fontSize: 24,
+              fontWeight: FontWeight.bold,
+              color: Theme.of(context).primaryColor,
+            ),
+          ),
+          const Divider(),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('Total a Pagar:', style: TextStyle(fontSize: 18)),
+              Text(
+                NumberFormat.currency(
+                  symbol: '\$',
+                  decimalDigits: 2,
+                ).format(widget.cart.totalCartPrice),
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          const Text(
+            'Método de Pago:',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          ListTile(
+            title: const Text('Efectivo'),
+            leading: Radio<String>(
+              value: 'Efectivo',
+              groupValue: _paymentMethod,
+              onChanged: (String? value) {
+                setState(() => _paymentMethod = value!);
+              },
+            ),
+          ),
+          ListTile(
+            title: const Text('Tarjeta de Crédito/Débito'),
+            leading: Radio<String>(
+              value: 'Tarjeta',
+              groupValue: _paymentMethod,
+              onChanged: (String? value) {
+                setState(() => _paymentMethod = value!);
+              },
+            ),
+          ),
+          const SizedBox(height: 20),
+          SizedBox(
+            width: double.infinity,
+            child: _isProcessing
+                ? const Center(child: CircularProgressIndicator())
+                : ElevatedButton.icon(
+                    onPressed: _placeOrder,
+                    icon: const Icon(Icons.check_circle_outline),
+                    label: const Text('Confirmar Pedido'),
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 15),
+                    ),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// =======================================================================
+// 10. PANTALLA DE ÓRDENES DE USUARIO
+// =======================================================================
+
+class UserOrdersScreen extends StatefulWidget {
+  final String userId;
+  const UserOrdersScreen({super.key, required this.userId});
+
+  @override
+  State<UserOrdersScreen> createState() => _UserOrdersScreenState();
+}
+
+class _UserOrdersScreenState extends State<UserOrdersScreen> {
+  late Future<List<Order>> _ordersFuture;
+  final ApiService _apiService = ApiService();
+
+  @override
+  void initState() {
+    super.initState();
+    _ordersFuture = _apiService.getUserOrders(widget.userId);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<List<Order>>(
+      future: _ordersFuture,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) {
+          return Center(
+            child: Text('Error al cargar órdenes: ${snapshot.error}'),
+          );
+        }
+        if (!snapshot.hasData || snapshot.data!.isEmpty) {
+          return const Center(
+            child: Text(
+              'Aún no tienes órdenes.',
+              style: TextStyle(fontSize: 18),
+            ),
+          );
+        }
+
+        final orders = snapshot.data!;
+        return ListView.builder(
+          itemCount: orders.length,
+          itemBuilder: (context, index) {
+            final order = orders[index];
+            return Card(
+              margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              child: ExpansionTile(
+                title: Text(
+                  'Orden #${order.id}',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                subtitle: Text(
+                  'Total: ${NumberFormat.currency(symbol: '\$', decimalDigits: 2).format(order.total)} | Estado: ${order.status}',
+                ),
+                children: order.items.map((item) {
+                  return ListTile(
+                    contentPadding: const EdgeInsets.only(left: 30, right: 16),
+                    title: Text(item.product.name),
+                    trailing: Text('x${item.quantity}'),
+                    subtitle: Text(
+                      'Precio: ${NumberFormat.currency(symbol: '\$', decimalDigits: 2).format(item.product.price)}',
+                    ),
+                  );
+                }).toList(),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+// =======================================================================
+// 11. PANTALLA DE CONFIRMACIÓN DE ORDEN
+// =======================================================================
 
 class OrderConfirmationScreen extends StatelessWidget {
   const OrderConfirmationScreen({super.key});
@@ -1789,31 +1832,30 @@ class OrderConfirmationScreen extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.check_circle, color: Colors.green, size: 80),
+              Icon(
+                Icons.check_circle_outline,
+                size: 80,
+                color: Theme.of(context).primaryColor,
+              ),
               const SizedBox(height: 20),
-              const Text(
-                '¡Orden Realizada con Éxito!',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 10),
-              const Text(
-                'Tu pedido está siendo procesado.',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 16, color: Colors.black54),
-              ),
-              const SizedBox(height: 30),
-              // Aquí no se usa un botón de vuelta a Home porque el HomeScreen maneja
-              // la navegación de vuelta automáticamente después de un tiempo.
-              CircularProgressIndicator(
-                valueColor: AlwaysStoppedAnimation<Color>(
-                  Theme.of(context).primaryColor,
+              Text(
+                '¡Orden Confirmada!',
+                style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  color: Theme.of(context).primaryColor,
                 ),
               ),
               const SizedBox(height: 10),
               const Text(
-                'Regresando al inicio en 3 segundos...',
-                style: TextStyle(fontSize: 12, color: Colors.black54),
+                'Tu pedido ha sido procesado con éxito. ¡Gracias por tu compra!',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 16),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Volviendo a la tienda en 3 segundos...',
+                style: TextStyle(color: Colors.grey),
               ),
             ],
           ),
@@ -1823,18 +1865,54 @@ class OrderConfirmationScreen extends StatelessWidget {
   }
 }
 
-class UserOrdersScreen extends StatefulWidget {
-  final String userId;
+// =======================================================================
+// 12. PANTALLAS DE ADMINISTRADOR
+// =======================================================================
 
-  const UserOrdersScreen({super.key, required this.userId});
+class AdminScreen extends StatelessWidget {
+  final User user;
+  final VoidCallback onLogout;
+  const AdminScreen({super.key, required this.user, required this.onLogout});
 
   @override
-  State<UserOrdersScreen> createState() => _UserOrdersScreenState();
+  Widget build(BuildContext context) {
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Panel de Administración'),
+          bottom: const TabBar(
+            tabs: [
+              Tab(text: 'Órdenes', icon: Icon(Icons.receipt)),
+              Tab(text: 'Productos', icon: Icon(Icons.inventory)),
+            ],
+          ),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.logout),
+              onPressed: onLogout,
+              tooltip: 'Cerrar Sesión',
+            ),
+          ],
+        ),
+        body: const TabBarView(
+          children: [AdminOrdersScreen(), AdminProductsScreen()],
+        ),
+      ),
+    );
+  }
 }
 
-class _UserOrdersScreenState extends State<UserOrdersScreen> {
+class AdminOrdersScreen extends StatefulWidget {
+  const AdminOrdersScreen({super.key});
+
+  @override
+  State<AdminOrdersScreen> createState() => _AdminOrdersScreenState();
+}
+
+class _AdminOrdersScreenState extends State<AdminOrdersScreen> {
+  late Future<List<Order>> _ordersFuture;
   final ApiService _apiService = ApiService();
-  Future<List<Order>>? _ordersFuture;
 
   @override
   void initState() {
@@ -1844,7 +1922,7 @@ class _UserOrdersScreenState extends State<UserOrdersScreen> {
 
   void _loadOrders() {
     setState(() {
-      _ordersFuture = _apiService.getUserOrders(widget.userId);
+      _ordersFuture = _apiService.getAdminOrders();
     });
   }
 
@@ -1862,35 +1940,45 @@ class _UserOrdersScreenState extends State<UserOrdersScreen> {
           );
         }
         if (!snapshot.hasData || snapshot.data!.isEmpty) {
-          return Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  Icons.inbox,
-                  size: 80,
-                  color: Theme.of(context).primaryColor,
-                ),
-                const SizedBox(height: 20),
-                const Text(
-                  'No tienes órdenes registradas.',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-              ],
-            ),
-          );
+          return const Center(child: Text('No hay órdenes pendientes.'));
         }
 
         final orders = snapshot.data!;
         return RefreshIndicator(
           onRefresh: () async {
-            // Recarga las órdenes
             _loadOrders();
+            await _ordersFuture;
           },
           child: ListView.builder(
             itemCount: orders.length,
             itemBuilder: (context, index) {
-              return OrderTile(order: orders[index]);
+              final order = orders[index];
+              return Card(
+                margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                child: ExpansionTile(
+                  leading: const Icon(Icons.shopping_bag_outlined),
+                  title: Text(
+                    'Orden #${order.id.substring(order.id.length - 4)}',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: Text(
+                    'Usuario: ${order.userId}\nTotal: ${NumberFormat.currency(symbol: '\$', decimalDigits: 2).format(order.total)} | Estado: ${order.status}',
+                  ),
+                  children: order.items.map((item) {
+                    return ListTile(
+                      contentPadding: const EdgeInsets.only(
+                        left: 30,
+                        right: 16,
+                      ),
+                      title: Text(item.product.name),
+                      trailing: Text('x${item.quantity}'),
+                      subtitle: Text(
+                        'Precio: ${NumberFormat.currency(symbol: '\$', decimalDigits: 2).format(item.product.price)}',
+                      ),
+                    );
+                  }).toList(),
+                ),
+              );
             },
           ),
         );
@@ -1899,138 +1987,46 @@ class _UserOrdersScreenState extends State<UserOrdersScreen> {
   }
 }
 
-// =======================================================================
-// 9. PANTALLA DE ADMINISTRADOR
-// =======================================================================
-
-class AdminScreen extends StatefulWidget {
-  final User user;
-  final VoidCallback onLogout;
-  const AdminScreen({super.key, required this.user, required this.onLogout});
-
-  @override
-  State<AdminScreen> createState() => _AdminScreenState();
-}
-
-class _AdminScreenState extends State<AdminScreen> {
-  final ApiService _apiService = ApiService();
-  Future<List<Order>>? _ordersFuture;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadOrders();
-  }
-
-  void _loadOrders() {
-    setState(() {
-      _ordersFuture = _apiService.getAdminOrders();
-    });
-  }
+class AdminProductsScreen extends StatelessWidget {
+  const AdminProductsScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Panel de Administración'),
-        automaticallyImplyLeading: false, // Oculta el botón de menú
-        actions: [
-          IconButton(icon: const Icon(Icons.refresh), onPressed: _loadOrders),
-          IconButton(
-            icon: const Icon(Icons.logout),
-            onPressed: widget.onLogout,
-            tooltip: 'Cerrar Sesión',
+    // Para simplificar, esta pantalla solo mostrará la lista de productos por defecto.
+    // La funcionalidad de "Administrar" (agregar/editar/eliminar) implicaría un manejo
+    // de estado más complejo y lógica de formularios que excede el objetivo de esta corrección.
+    final products = ApiService._defaultProducts;
+
+    return ListView.builder(
+      itemCount: products.length,
+      itemBuilder: (context, index) {
+        final product = products[index];
+        return ListTile(
+          leading: SizedBox(
+            width: 50,
+            height: 50,
+            child: Image.asset(
+              product.imagePath,
+              fit: BoxFit.cover,
+              errorBuilder: (c, e, s) => Container(color: Colors.grey),
+            ),
           ),
-        ],
-      ),
-      body: FutureBuilder<List<Order>>(
-        future: _ordersFuture,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snapshot.hasError) {
-            return Center(
-              child: Text('Error al cargar órdenes: ${snapshot.error}'),
-            );
-          }
-          if (!snapshot.hasData || snapshot.data!.isEmpty) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    Icons.inventory,
-                    size: 80,
-                    color: Theme.of(context).primaryColor,
-                  ),
-                  const SizedBox(height: 20),
-                  const Text(
-                    'No hay órdenes registradas aún.',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                ],
-              ),
-            );
-          }
-
-          final orders = snapshot.data!;
-          final totalSales = orders.fold(
-            0.0,
-            (sum, order) => sum + order.total,
-          );
-
-          return Column(
-            children: [
-              Card(
-                margin: const EdgeInsets.all(12.0),
-                elevation: 4,
-                color: Theme.of(context).primaryColor.withOpacity(0.9),
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Text(
-                        'Ventas Totales:',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                        ),
-                      ),
-                      Text(
-                        NumberFormat.currency(
-                          symbol: '\$',
-                          decimalDigits: 2,
-                        ).format(totalSales),
-                        style: const TextStyle(
-                          fontSize: 22,
-                          fontWeight: FontWeight.w900,
-                          color: Colors.white,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              Expanded(
-                child: RefreshIndicator(
-                  onRefresh: () async {
-                    _loadOrders();
-                  },
-                  child: ListView.builder(
-                    itemCount: orders.length,
-                    itemBuilder: (context, index) {
-                      return OrderTile(order: orders[index], isAdminView: true);
-                    },
-                  ),
-                ),
-              ),
-            ],
-          );
-        },
-      ),
+          title: Text(
+            product.name,
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          subtitle: Text(
+            'Categoría: ${product.category} | Precio: ${NumberFormat.currency(symbol: '\$', decimalDigits: 2).format(product.price)}',
+          ),
+          trailing: const Icon(
+            Icons.edit,
+            color: Colors.blue,
+          ), // Placeholder para la acción de editar
+          onTap: () {
+            // Acción de editar/ver detalles
+          },
+        );
+      },
     );
   }
 }
