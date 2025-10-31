@@ -672,8 +672,8 @@ class TiendaOnlineReinaApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // Definición de colores
-    final Color wineRed = const Color(0xFFB71C1C);
-    final Color pastelPink = const Color(0xFFF8C8DC);
+    const Color wineRed = Color(0xFFB71C1C);
+    const Color pastelPink = Color(0xFFF8C8DC);
 
     return MaterialApp(
       title: 'Tienda Online Reina',
